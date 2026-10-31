@@ -4,16 +4,65 @@
 package github
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/runatlantis/atlantis/server/events/models"
 	"github.com/runatlantis/atlantis/server/events/vcs/github/testdata"
 	"github.com/runatlantis/atlantis/server/logging"
 	. "github.com/runatlantis/atlantis/testing"
 )
+
+func TestAppCredentials_GetUserTimeout(t *testing.T) {
+	for _, host := range []string{"github.com", "github.example.com", "tenant.ghe.com"} {
+		for _, slug := range []string{"", "configured-slug"} {
+			if slug != "" && !isGHECloud(host) {
+				continue
+			}
+			t.Run(host+"/"+slug, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					previous := http.DefaultTransport
+					t.Cleanup(func() { http.DefaultTransport = previous })
+					requests := 0
+					http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						requests++
+						deadline, ok := req.Context().Deadline()
+						Assert(t, ok, "app identity lookup must have a deadline")
+						Equals(t, 10*time.Second, time.Until(deadline))
+						// Simulate an API that never sends response headers.
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					})
+					creds := &AppCredentials{AppID: 1, InstallationID: 1, Key: []byte(testdata.PrivateKey), Hostname: host, AppSlug: slug}
+					start := time.Now()
+					user, err := creds.GetUser()
+					Assert(t, errors.Is(err, context.DeadlineExceeded), "expected identity lookup deadline, got %v", err)
+					Equals(t, "", user)
+					Equals(t, 10*time.Second, time.Since(start))
+
+					start = time.Now()
+					client, err := New(host, creds, Config{}, 0, logging.NewNoopLogger(t))
+					Equals(t, 10*time.Second, time.Since(start))
+					if slug == "" {
+						Ok(t, err)
+						self, err := client.IsAtlantisUser(models.Repo{}, models.User{Username: "actual-app[bot]"})
+						Ok(t, err)
+						Equals(t, false, self)
+					} else {
+						Assert(t, errors.Is(err, context.DeadlineExceeded), "configured app lookup must still return its error, got %v", err)
+					}
+					Equals(t, 2, requests)
+				})
+			})
+		}
+	}
+}
 
 func TestAppCredentials_GetUserJWT(t *testing.T) {
 	for _, host := range []string{"github.com", "github.example.com", "tenant.ghe.com"} {

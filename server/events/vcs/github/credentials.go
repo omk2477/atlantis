@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
@@ -129,7 +130,9 @@ func (c *AppCredentials) Client() (*http.Client, error) {
 
 // GetUser returns the username for these credentials.
 func (c *AppCredentials) GetUser() (string, error) {
-	ctx := context.Background()
+	// Bound identity discovery so an unresponsive API cannot block startup.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	// GHE Cloud doesn't support the /apps/{slug} endpoint with installation
 	// tokens, so use the /app self-lookup which requires app-level JWT auth.
